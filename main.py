@@ -108,53 +108,51 @@ async def agent_loop(query: str, tools: dict, messages: List[dict] = None):
     return response.choices[0].message.content, messages
 
 async def main():
-    """
-    Main function that sets up the MCP server, initializes tools, and runs the interactive loop.
-    The server is run in a Docker container to ensure isolation and consistency.
-    """
     try:
-        # Configure Docker-based MCP server for SQLite
-        server_params = StdioServerParameters(
+        # Configure Docker-based MCP servers for SQLite and PostgreSQL
+        sqlite_params = StdioServerParameters(
             command="docker",
             args=[
                 "run",
-                "--rm",  # Remove container after exit
-                "-i",  # Interactive mode
-                "-v",  # Mount volume
-                "mcp-test:/mcp",  # Map local volume to container path
-                "mcp/sqlite",  # Use SQLite MCP image
+                "--rm",
+                "-i",
+                "-v",
+                "mcp-test:/mcp",
+                "mcp/sqlite",
                 "--db-path",
-                "/mcp/test.db",  # Database file path inside container
+                "/mcp/test.db",
             ],
             env=None,
         )
 
-        # Start MCP client and create interactive session
-        async with MCPClient(server_params) as mcp_client:
+        postgres_params = StdioServerParameters(
+            command="docker",
+            args=[
+                "run",
+                "--rm",
+                "-i",
+                "mcp/postgres",
+                "postgresql://host.docker.internal:5432/mydb"
+            ],
+            env=None,
+        )
+
+        # Start both MCP clients
+        async with MCPClient(sqlite_params) as sqlite_client, MCPClient(postgres_params) as postgres_client:
             try:
-                # Get available database tools
-                tools_data = await mcp_client.get_available_tools()
-                
-                # Process tools based on the debug output
+                # Fetch available tools from both servers
+                sqlite_tools_data = await sqlite_client.get_available_tools()
+                postgres_tools_data = await postgres_client.get_available_tools()
+
                 tools = {}
-                
-                # We'll adapt this part based on the debug output
-                if isinstance(tools_data, tuple) and len(tools_data) >= 2:
-                    tools_list = tools_data[1]  # Assuming the second element contains the tools
-                    
-                    # Debug: Let's see what's in the tools list
-                    print(f"Tools list type: {type(tools_list)}")
-                    if tools_list:
-                        first_tool = tools_list[0] if tools_list else None
-                        print(f"First tool type: {type(first_tool)}")
-                        print(f"First tool dir: {dir(first_tool)}")
-                    
-                    # Now build the tools dictionary
-                    for tool in tools_list:
-                        try:
+
+                def process_tools(tools_data, client):
+                    if isinstance(tools_data, tuple) and len(tools_data) >= 2:
+                        tools_list = tools_data[1]
+                        for tool in tools_list:
                             tools[tool.name] = {
                                 "name": tool.name,
-                                "callable": mcp_client.call_tool(tool.name),
+                                "callable": client.call_tool(tool.name),
                                 "schema": {
                                     "type": "function",
                                     "function": {
@@ -164,28 +162,25 @@ async def main():
                                     },
                                 },
                             }
-                        except AttributeError as e:
-                            print(f"Error with tool: {tool}")
-                            print(f"Tool attributes: {dir(tool) if hasattr(tool, '__dir__') else 'No dir'}")
-                            raise
-                
-                # Start interactive prompt loop for user queries
+
+                # Process both toolsets
+                process_tools(sqlite_tools_data, sqlite_client)
+                process_tools(postgres_tools_data, postgres_client)
+
                 messages = None
                 while True:
                     try:
-                        # Get user input and check for exit commands
                         user_input = input("\nEnter your prompt (or 'quit' to exit): ")
                         if user_input.lower() in ["quit", "exit", "q"]:
                             break
 
-                        # Process the prompt and run agent loop
                         response, messages = await agent_loop(user_input, tools, messages)
                         print("\nResponse:", response)
                     except KeyboardInterrupt:
                         print("\nExiting...")
                         break
                     except Exception as e:
-                        print(f"\nError occurred in prompt loop: {e}")
+                        print(f"\nError in prompt loop: {e}")
             except Exception as e:
                 print(f"\nError setting up tools: {e}")
                 import traceback
